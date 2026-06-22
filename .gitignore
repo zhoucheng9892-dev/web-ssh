@@ -1,0 +1,21 @@
+# Rust / backend
+backend/target/
+# Data files (SQLite db + generated .env) live in backend/data/
+backend/data/
+backend/webssh.db
+backend/webssh.db-shm
+backend/webssh.db-wal
+backend/.env
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+frontend/vite.config.d.ts
+frontend/vite.config.js
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

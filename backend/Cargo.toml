@@ -1,0 +1,65 @@
+[package]
+name = "web-ssh-backend"
+version = "0.1.0"
+edition = "2021"
+description = "Web-based multi-session SSH client (backend)"
+license = "MIT"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.52", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tokio-stream = "0.1"
+futures = "0.3"
+
+# Web framework
+axum = { version = "0.8", features = ["ws", "macros", "multipart"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+
+# Sessions + auth
+tower-sessions = "0.14"
+tower-sessions-rusqlite-store = "0.14"
+argon2 = "0.5"
+
+# Database (rusqlite 0.37 unifies deadpool-sqlite 0.12 + tower-sessions-rusqlite-store 0.14)
+rusqlite = { version = "0.37", features = ["bundled"] }
+deadpool-sqlite = "0.12"
+
+# SSH (0.49 family: russh + russh-keys + russh-util + russh-sftp 2.0.5)
+russh = "0.49"
+russh-sftp = "2.0"
+russh-keys = "0.49"
+russh-util = "0.48"
+
+# Crypto for at-rest credential encryption
+aes-gcm = "0.10"
+rand = "0.8"
+base64 = "0.22"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Misc
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+mime_guess = "2"
+rust-embed = "8"
+captcha = "1.0.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,29 @@
+services:
+  webssh:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: web-ssh:latest
+    container_name: webssh
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      # Persist the SQLite database + generated .env (secret keys) across
+      # rebuilds. If the keys change, already-encrypted SSH credentials can no
+      # longer be decrypted, so keep this volume stable.
+      - webssh-data:/app/data
+    environment:
+      # Bind all interfaces inside the container (the port mapping handles host exposure).
+      WEBSSH_HOST: 0.0.0.0
+      WEBSSH_PORT: 3000
+      # Session cookie lifetime in seconds (default 7 days).
+      WEBSSH_SESSION_TTL_SECS: 604800
+      # Terminal idle timeout in seconds (0 = never disconnect on idle).
+      WEBSSH_TERMINAL_IDLE_TIMEOUT_SECS: 0
+      # Override WEBSSH_DATA_DIR or WEBSSH_DATABASE_URL here if you prefer a
+      # different layout. Defaults to /app/data.
+      # WEBSSH_DATA_DIR: /app/data
+
+volumes:
+  webssh-data:

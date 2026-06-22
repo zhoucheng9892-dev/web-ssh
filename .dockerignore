@@ -1,0 +1,32 @@
+# Exclude everything not needed for the build to keep context small and fast.
+
+# VCS / editor
+.git
+.gitignore
+.idea
+.vscode
+*.swp
+.DS_Store
+
+# Build artifacts
+backend/target
+backend/data
+backend/webssh.db
+backend/webssh.db-shm
+backend/webssh.db-wal
+backend/.env
+
+frontend/node_modules
+frontend/dist
+# Stray TS build info / compiled vite config (shouldn't ship in repo).
+frontend/*.tsbuildinfo
+frontend/vite.config.d.ts
+frontend/vite.config.js
+
+# Docker files themselves
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Docs
+README.md
