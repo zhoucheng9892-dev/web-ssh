@@ -34,6 +34,7 @@ WORKDIR /app
 # ca-certificates: for russh/TLS to remote hosts; tini: proper signal handling.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates tini \
+        openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user for safety. Data dir is /app/data (mounted as a volume).
