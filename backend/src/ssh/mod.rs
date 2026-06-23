@@ -32,29 +32,39 @@ const MAX_KBDI_ROUNDS: usize = 3;
 /// slow PAM, infinite kbd-interactive prompts) cannot park a connection slot
 /// indefinitely and starve other terminals.
 ///
-/// For password auth, `keyboard-interactive` is tried **before** the `password`
-/// method. This mirrors the OpenSSH client's default `PreferredAuthentications`
-/// order and matters in practice: many sshd setups (even with
-/// `PasswordAuthentication yes`) only complete verification through PAM, which
-/// is reachable via `keyboard-interactive` but rejected on the `password`
-/// method. Crucially, each method is attempted on its **own fresh connection** —
-/// reusing one handle after an auth failure leaves russh's session state machine
-/// in a state where a follow-up method can hang until timeout (the underlying
-/// reply channel stops routing responses). Starting clean sidesteps that.
+/// For password auth we try **both** SSH password methods (`password` then
+/// `keyboard-interactive`), each on its own fresh connection. A server may
+/// support only one, and worse, may silently drop a request for a method it
+/// doesn't support instead of returning a clean failure — which looks like a
+/// timeout. So a rejection *or* a timeout on the first method is never fatal:
+/// we record it and still try the other. Each method dials independently so a
+/// half-finished session never poisons the next attempt.
 pub async fn connect(host: &str, port: u16, user: &str, secret: &ConnectionSecret) -> Result<client::Handle<ClientHandler>> {
     match secret.auth_type.as_str() {
         "password" => {
             let password = String::from_utf8_lossy(&secret.secret).to_string();
-            // 1) keyboard-interactive first (PAM-compatible, matches openssh).
-            match try_password_auth(host, port, user, &password, Method::KeyboardInteractive).await? {
-                AuthOutcome::Success(handle) => return Ok(handle),
-                AuthOutcome::Rejected => {}
+            // Try both SSH password methods on independent fresh connections.
+            // A server may support only one: `password` (single round-trip) or
+            // `keyboard-interactive` (PAM, multi-prompt). We can't know in
+            // advance, and — importantly — a server that doesn't support the
+            // requested method may simply *not respond* rather than sending a
+            // clean USERAUTH_FAILURE, which surfaces as a timeout. So neither a
+            // rejection nor a timeout on the first method should stop us from
+            // trying the other; we only fail if both come back negative.
+            for method in [Method::Password, Method::KeyboardInteractive] {
+                match try_password_auth(host, port, user, &password, method).await {
+                    Ok(AuthOutcome::Success(handle)) => return Ok(handle),
+                    Ok(AuthOutcome::Rejected) => {
+                        tracing::info!(?method, "auth method rejected, trying next");
+                    }
+                    Err(e) => {
+                        // Timeout or transport error on this method — record it
+                        // and still try the other method before giving up.
+                        tracing::warn!(?method, error = %e, "auth method failed, trying next");
+                    }
+                }
             }
-            // 2) Fall back to the plain `password` method on a fresh connection.
-            match try_password_auth(host, port, user, &password, Method::Password).await? {
-                AuthOutcome::Success(handle) => return Ok(handle),
-                AuthOutcome::Rejected => bail!("authentication rejected by server"),
-            }
+            bail!("authentication rejected by server (tried password and keyboard-interactive)");
         }
         "key" => {
             let pem = String::from_utf8_lossy(&secret.secret).to_string();
@@ -75,6 +85,7 @@ pub async fn connect(host: &str, port: u16, user: &str, secret: &ConnectionSecre
 }
 
 /// Which password auth method to attempt on a fresh connection.
+#[derive(Debug, Clone, Copy)]
 enum Method {
     Password,
     KeyboardInteractive,
