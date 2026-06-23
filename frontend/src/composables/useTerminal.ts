@@ -26,6 +26,9 @@ export interface TerminalSession {
   pane: HTMLDivElement | null
   ws: WebSocket | null
   closed: boolean
+  /** True once the WebSocket handshake succeeded (we received any frame). Used
+   *  to tell a rejected handshake apart from a mid-session drop on close. */
+  everOpened: boolean
   /** Output buffered while detached (no pane). */
   pending: Uint8Array[]
   cols: number
@@ -102,6 +105,7 @@ export function openSession(connectionId: number, title: string): TerminalSessio
     pane: null,
     ws: null,
     closed: false,
+    everOpened: false,
     pending: [],
     cols: 80,
     rows: 24,
@@ -112,6 +116,7 @@ export function openSession(connectionId: number, title: string): TerminalSessio
   session.ws = ws
 
   ws.onmessage = (ev) => {
+    session.everOpened = true
     if (typeof ev.data === 'string') {
       try {
         const msg = JSON.parse(ev.data)
@@ -136,9 +141,27 @@ export function openSession(connectionId: number, title: string): TerminalSessio
     writeOutput(session, new Uint8Array(ev.data as ArrayBuffer))
   }
 
-  ws.onclose = () => {
+  // The browser fires onerror before onclose on a rejected handshake but gives
+  // no payload — the HTTP error body is unreachable. onclose distinguishes the
+  // two cases: never received a frame => handshake rejected (the probe should
+  // have caught it, but races are possible); otherwise a mid-session drop.
+  ws.onerror = () => {
+    /* details surface in onclose via everOpened/code below */
+  }
+
+  ws.onclose = (ev) => {
     session.closed = true
-    writeOutput(session, '\r\n\x1b[31m[connection closed]\x1b[0m')
+    const reason = ev.reason?.trim()
+    if (!session.everOpened && ev.code === 1006) {
+      writeOutput(
+        session,
+        '\r\n\x1b[31m[连接被拒绝：握手失败，请检查目标机器的 sshd 是否可达，或查看后端日志]\x1b[0m',
+      )
+    } else if (reason) {
+      writeOutput(session, `\r\n\x1b[31m[connection closed（${reason}）]\x1b[0m`)
+    } else {
+      writeOutput(session, '\r\n\x1b[31m[connection closed]\x1b[0m')
+    }
   }
 
   terminal.onData((data) => {

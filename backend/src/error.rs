@@ -53,6 +53,14 @@ impl IntoResponse for AppError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
             }
         };
+        // Client-facing errors (BadRequest/Conflict/etc.) carry the real reason
+        // (e.g. "SSH 连接失败: ...") but used to be logged nowhere. Surface them
+        // at WARN so operators can see the root cause in `kubectl logs` without
+        // having to capture the HTTP body — critical for WebSocket paths where
+        // the browser cannot read the response body at all.
+        if status.is_client_error() {
+            tracing::warn!(status = %status, msg = %msg, "request rejected");
+        }
         (status, Json(json!({ "error": msg }))).into_response()
     }
 }

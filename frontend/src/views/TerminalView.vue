@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { nextTick, onActivated, onBeforeUnmount, onDeactivated, ref } from 'vue'
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { connectionsApi, type Connection } from '@/api/connections'
+import { terminalApi } from '@/api/terminal'
 import {
   attachSession,
   closeSession,
@@ -18,12 +19,29 @@ const sessions = ref<TerminalSession[]>([])
 const activeId = ref<string | null>(null)
 /** Map session id -> its pane div element (only populated while visible). */
 const paneRefs = ref<Record<string, HTMLDivElement>>({})
+/** Connection ids currently being probed; disables the picker while in flight. */
+const probing = ref(false)
 
 async function loadConnections() {
   connections.value = await connectionsApi.list()
 }
 
 async function openTerminal(c: Connection) {
+  // Pre-flight: dial + authenticate via a normal HTTP request so the real
+  // failure reason (DNS / algorithm negotiation / auth / timeout …) is surfaced
+  // through the axios interceptor. The WebSocket upgrade path can't deliver
+  // this — the browser hides the HTTP error body on a rejected handshake.
+  if (probing.value) return
+  probing.value = true
+  try {
+    await terminalApi.probe(c.id)
+  } catch (e: any) {
+    ElMessage.error(e.message || '连接失败')
+    probing.value = false
+    return
+  }
+  probing.value = false
+
   // Allow multiple independent sessions to the same connection. Disambiguate
   // the tab title with a counter (e.g. "myhost", "myhost (2)").
   const sameConn = sessions.value.filter((s) => s.connectionId === c.id).length

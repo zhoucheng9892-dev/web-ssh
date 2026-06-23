@@ -98,7 +98,8 @@ fn build_router(state: AppState) -> Router {
         .route("/files/upload", post(files::upload))
         .route("/files/mkdir", post(files::mkdir))
         .route("/files", axum::routing::delete(files::remove))
-        .route("/terminal/connect", get(terminal::connect));
+        .route("/terminal/connect", get(terminal::connect))
+        .route("/terminal/probe", get(terminal::probe));
 
     Router::new()
         .nest("/api", api)

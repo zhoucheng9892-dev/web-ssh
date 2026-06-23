@@ -6,6 +6,7 @@
 //!   and `{"type":"ping"}`.
 
 use axum::{
+    Json,
     extract::{Query, State, WebSocketUpgrade},
     response::Response,
 };
@@ -76,6 +77,49 @@ pub async fn connect(
         run_bridge(socket, channel, idle_timeout)
             .instrument(tracing::info_span!("terminal", conn = q.connection_id))
     }))
+}
+
+/// `GET /api/terminal/probe?connection_id=` — pre-flight SSH connectivity check.
+///
+/// Dials the target host, authenticates, and immediately drops the handle
+/// (no shell/PTY is opened). On failure the cause is returned as a normal
+/// `AppError::BadRequest` JSON body — unlike the WebSocket upgrade path, where
+/// the browser cannot read the HTTP error body at all. This lets the frontend
+/// show the real reason (DNS, algorithm negotiation, auth, timeout, …) before
+/// attempting a terminal session.
+pub async fn probe(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Query(q): Query<ConnectQuery>,
+) -> AppResult<Json<serde_json::Value>> {
+    let secret = resolve_secret(&state, user.0, q.connection_id).await?;
+    let dial = get_connection_dial(&state.pool, user.0, q.connection_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    // connect() includes TCP + handshake + auth, each bounded by timeouts. A
+    // failure here is exactly the failure mode the terminal upgrade would hit.
+    let handle = ssh::connect(&dial.host, dial.port as u16, &dial.username, &secret)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("SSH 连接失败: {e}")))?;
+    // No shell — just close the underlying session. `disconnect` sends a clean
+    // SSH disconnect message; the handle is dropped on return regardless.
+    let _ = handle
+        .disconnect(russh::Disconnect::ByApplication, "", "en")
+        .await;
+
+    tracing::info!(
+        host = %dial.host,
+        port = dial.port,
+        user = %dial.username,
+        "terminal probe ok"
+    );
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "host": dial.host,
+        "port": dial.port,
+        "username": dial.username,
+    })))
 }
 
 /// Drive the SSH channel and the WebSocket concurrently.
