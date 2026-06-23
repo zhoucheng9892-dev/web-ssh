@@ -29,10 +29,22 @@ pub async fn connect(host: &str, port: u16, user: &str, secret: &ConnectionSecre
     let authed = match secret.auth_type.as_str() {
         "password" => {
             let password = String::from_utf8_lossy(&secret.secret).to_string();
-            handle
-                .authenticate_password(user, password)
-                .await
-                .map_err(|e| anyhow!("password auth error: {e}"))?
+            // Try the SSH `password` method first; on rejection fall back to
+            // `keyboard-interactive` (PAM). Some sshd — notably older CentOS /
+            // Ubuntu — ship with `PasswordAuthentication no` and only allow
+            // KbdInteractiveAuthentication, which `ssh` CLI does silently.
+            match handle.authenticate_password(user, password.clone()).await {
+                Ok(true) => true,
+                Ok(false) => match auth_keyboard_interactive(&mut handle, user, &password).await {
+                    Ok(true) => {
+                        tracing::info!("auth succeeded via keyboard-interactive fallback");
+                        true
+                    }
+                    Ok(false) => false,
+                    Err(e) => return Err(anyhow!("keyboard-interactive auth error: {e}")),
+                },
+                Err(e) => return Err(anyhow!("password auth error: {e}")),
+            }
         }
         "key" => {
             let pem = String::from_utf8_lossy(&secret.secret).to_string();
@@ -51,6 +63,39 @@ pub async fn connect(host: &str, port: u16, user: &str, secret: &ConnectionSecre
         bail!("authentication rejected by server");
     }
     Ok(handle)
+}
+
+/// Drive keyboard-interactive auth, replying with `password` to every prompt.
+///
+/// Mirrors what `ssh` CLI does when `password` is rejected: respond to each PAM
+/// prompt with the same password. Covers the typical single-prompt "Password: "
+/// case (most Linux PAM setups) and tolerates multi-round / empty-prompt flows.
+async fn auth_keyboard_interactive(
+    handle: &mut client::Handle<ClientHandler>,
+    user: &str,
+    password: &str,
+) -> Result<bool> {
+    use russh::client::KeyboardInteractiveAuthResponse;
+
+    let mut resp = handle
+        .authenticate_keyboard_interactive_start(user, None::<String>)
+        .await?;
+    loop {
+        match resp {
+            KeyboardInteractiveAuthResponse::Success => return Ok(true),
+            KeyboardInteractiveAuthResponse::Failure => return Ok(false),
+            KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. } => {
+                let responses = if prompts.is_empty() {
+                    Vec::new()
+                } else {
+                    std::iter::repeat_with(|| password.to_string())
+                        .take(prompts.len())
+                        .collect()
+                };
+                resp = handle.authenticate_keyboard_interactive_respond(responses).await?;
+            }
+        }
+    }
 }
 
 /// Per-connection event handler. TOFU host-key policy: accept and log the

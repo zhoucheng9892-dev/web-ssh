@@ -63,8 +63,12 @@ pub async fn connect(
         .await?
         .ok_or(AppError::NotFound)?;
 
-    let handle = ssh::connect(&dial.host, dial.port as u16, &dial.username, &secret).await?;
-    let channel = ssh::open_shell(&handle, q.cols, q.rows).await?;
+    let handle = ssh::connect(&dial.host, dial.port as u16, &dial.username, &secret)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("SSH 连接失败: {e}")))?;
+    let channel = ssh::open_shell(&handle, q.cols, q.rows)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("打开 shell 失败: {e}")))?;
     let _ = touch_last_used(&state.pool, q.connection_id).await;
 
     let idle_timeout = state.config.terminal_idle_timeout_secs;
