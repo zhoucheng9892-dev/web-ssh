@@ -31,34 +31,29 @@ const MAX_KBDI_ROUNDS: usize = 3;
 /// Every step is wrapped in a timeout so a misbehaving server (silent drops,
 /// slow PAM, infinite kbd-interactive prompts) cannot park a connection slot
 /// indefinitely and starve other terminals.
+///
+/// For password auth, `keyboard-interactive` is tried **before** the `password`
+/// method. This mirrors the OpenSSH client's default `PreferredAuthentications`
+/// order and matters in practice: many sshd setups (even with
+/// `PasswordAuthentication yes`) only complete verification through PAM, which
+/// is reachable via `keyboard-interactive` but rejected on the `password`
+/// method. Crucially, each method is attempted on its **own fresh connection** —
+/// reusing one handle after an auth failure leaves russh's session state machine
+/// in a state where a follow-up method can hang until timeout (the underlying
+/// reply channel stops routing responses). Starting clean sidesteps that.
 pub async fn connect(host: &str, port: u16, user: &str, secret: &ConnectionSecret) -> Result<client::Handle<ClientHandler>> {
-    let config = Arc::new(client::Config {
-        ..Default::default()
-    });
-    let addr = (host, port);
-    let handler = ClientHandler;
-    let mut handle = tokio::time::timeout(HANDSHAKE_TIMEOUT, client::connect(config, addr, handler))
-        .await
-        .map_err(|_| anyhow!("SSH 握手超时（{}/{host}:{port}）", humandur(HANDSHAKE_TIMEOUT)))?
-        .map_err(|e| anyhow!("ssh connect to {host}:{port} failed: {e}"))?;
-
-    let authed = match secret.auth_type.as_str() {
+    match secret.auth_type.as_str() {
         "password" => {
             let password = String::from_utf8_lossy(&secret.secret).to_string();
-            // Try the SSH `password` method first; on rejection fall back to
-            // `keyboard-interactive` (PAM). Some sshd — notably older CentOS /
-            // Ubuntu — ship with `PasswordAuthentication no` and only allow
-            // KbdInteractiveAuthentication, which `ssh` CLI does silently.
-            match auth_op("password", handle.authenticate_password(user, password.clone())).await? {
-                true => true,
-                false => match auth_keyboard_interactive(&mut handle, user, &password).await {
-                    Ok(true) => {
-                        tracing::info!("auth succeeded via keyboard-interactive fallback");
-                        true
-                    }
-                    Ok(false) => false,
-                    Err(e) => return Err(anyhow!("keyboard-interactive auth error: {e}")),
-                },
+            // 1) keyboard-interactive first (PAM-compatible, matches openssh).
+            match try_password_auth(host, port, user, &password, Method::KeyboardInteractive).await? {
+                AuthOutcome::Success(handle) => return Ok(handle),
+                AuthOutcome::Rejected => {}
+            }
+            // 2) Fall back to the plain `password` method on a fresh connection.
+            match try_password_auth(host, port, user, &password, Method::Password).await? {
+                AuthOutcome::Success(handle) => return Ok(handle),
+                AuthOutcome::Rejected => bail!("authentication rejected by server"),
             }
         }
         "key" => {
@@ -67,14 +62,69 @@ pub async fn connect(host: &str, port: u16, user: &str, secret: &ConnectionSecre
                 .context("failed to parse private key PEM")?;
             let key_with_alg = PrivateKeyWithHashAlg::new(Arc::new(key), None)
                 .map_err(|e| anyhow!("key/hash alg: {e}"))?;
-            auth_op("publickey", handle.authenticate_publickey(user, key_with_alg)).await?
+            // Publickey is a single clean attempt.
+            let mut handle = dial(host, port).await?;
+            let authed = auth_op("publickey", handle.authenticate_publickey(user, key_with_alg)).await?;
+            if !authed {
+                bail!("authentication rejected by server");
+            }
+            Ok(handle)
         }
         other => bail!("unsupported auth_type: {other}"),
-    };
-    if !authed {
-        bail!("authentication rejected by server");
     }
-    Ok(handle)
+}
+
+/// Which password auth method to attempt on a fresh connection.
+enum Method {
+    Password,
+    KeyboardInteractive,
+}
+
+/// Outcome of a single password-auth attempt on a fresh connection.
+enum AuthOutcome {
+    /// Authenticated; the caller owns the live handle.
+    Success(client::Handle<ClientHandler>),
+    /// Server rejected this method/credentials (try another method or give up).
+    Rejected,
+}
+
+/// Open a brand-new SSH connection (TCP + handshake) and authenticate with the
+/// chosen password method. On rejection the half-open handle is dropped so the
+/// session ends cleanly; the caller may then dial again for a fallback method.
+async fn try_password_auth(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    method: Method,
+) -> Result<AuthOutcome> {
+    let mut handle = dial(host, port).await?;
+    let ok = match method {
+        Method::Password => {
+            tracing::debug!("trying SSH password auth");
+            auth_op("password", handle.authenticate_password(user, password.to_string())).await?
+        }
+        Method::KeyboardInteractive => {
+            tracing::debug!("trying SSH keyboard-interactive auth");
+            auth_keyboard_interactive(&mut handle, user, password).await?
+        }
+    };
+    if ok {
+        Ok(AuthOutcome::Success(handle))
+    } else {
+        Ok(AuthOutcome::Rejected)
+    }
+}
+
+/// Establish a fresh TCP + SSH handshake. Factored out so each auth attempt
+/// starts from a clean session state (see [`connect`] for why this matters).
+async fn dial(host: &str, port: u16) -> Result<client::Handle<ClientHandler>> {
+    let config = Arc::new(client::Config { ..Default::default() });
+    let handler = ClientHandler;
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, client::connect(config, (host, port), handler))
+        .await
+        .map_err(|_| anyhow!("SSH 握手超时（{}/{host}:{port}）", humandur(HANDSHAKE_TIMEOUT)))?
+        .map_err(|e| anyhow!("ssh connect to {host}:{port} failed: {e}"))
 }
 
 /// Wrap an auth future in [`AUTH_OP_TIMEOUT`] and normalise errors so a hung
@@ -92,11 +142,12 @@ where
 
 /// Drive keyboard-interactive auth, replying with `password` to every prompt.
 ///
-/// Mirrors what `ssh` CLI does when `password` is rejected: respond to each PAM
-/// prompt with the same password. Covers the typical single-prompt "Password: "
-/// case (most Linux PAM setups) and tolerates multi-round / empty-prompt flows.
-/// Each round is bounded by [`AUTH_OP_TIMEOUT`] and the total number of rounds
-/// by [`MAX_KBDI_ROUNDS`].
+/// This is the primary password path (tried before the `password` method) and
+/// matches what the `ssh` CLI does by default: respond to each PAM prompt with
+/// the same password. Covers the typical single-prompt "Password: " case (most
+/// Linux PAM setups) and tolerates multi-round / empty-prompt flows. Each round
+/// is bounded by [`AUTH_OP_TIMEOUT`] and the total number of rounds by
+/// [`MAX_KBDI_ROUNDS`].
 async fn auth_keyboard_interactive(
     handle: &mut client::Handle<ClientHandler>,
     user: &str,
