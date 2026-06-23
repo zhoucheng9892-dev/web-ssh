@@ -6,6 +6,9 @@ import vue from '@vitejs/plugin-vue'
 // backend. In production, Vite builds static assets that the backend embeds.
 export default defineConfig({
   plugins: [vue()],
+  // Relative base: combined with the backend-injected <base href> in index.html,
+  // this lets the same build serve under any context path (e.g. /webssh/).
+  base: './',
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

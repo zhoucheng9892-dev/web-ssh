@@ -117,6 +117,7 @@ docker compose down -v          # 同时删除数据卷（⚠️ 会丢失已加
 |------|------|------|
 | `WEBSSH_HOST` | `127.0.0.1` | 监听地址 |
 | `WEBSSH_PORT` | `3000` | 监听端口 |
+| `WEBSSH_CONTEXT_PATH` | `（空）` | 子路径部署，如 `/webssh`。空 = 根部署；非空时整个应用（含 `/api`、`/healthz`）都挂在该前缀下，根路径 `/` 会 302 跳转。环境变量优先级高于配置文件 |
 | `WEBSSH_DATABASE_URL` | `sqlite://webssh.db?mode=rwc` | SQLite 文件 |
 | `WEBSSH_MASTER_KEY` | （自动生成） | 32 字节，base64，用于加密 SSH 凭据 |
 | `WEBSSH_SESSION_KEY` | （自动生成） | 64 字节，base64，签名会话 Cookie |
@@ -125,6 +126,7 @@ docker compose down -v          # 同时删除数据卷（⚠️ 会丢失已加
 
 ## 安全说明
 
+- **Web 账号密码采用双层哈希**：前端用浏览器原生 Web Crypto API 对密码做 `SHA-256`（hex）后再传输，后端收到后用 **Argon2id**（带随机 salt 的慢哈希）再次哈希存储。明文密码从不离开浏览器、不进日志；数据库里只存 Argon2id 哈希，即便泄漏也无法反推。
 - SSH 凭据（密码/私钥）在浏览器 → 后端传输后，**使用 AES-256-GCM 加密落库**，主密钥仅存在于服务端，从不返回给前端。`GET /api/connections/{id}` 只回显非敏感字段。
 - 服务器公钥校验目前采用 **TOFU（首次信任）** 策略并记录指纹；后续可扩展为 `known_hosts` 强校验。
 - 数据隔离：所有 `connections` 查询均带 `user_id` 过滤，SFTP 会话缓存同样以 `(user_id, connection_id)` 为键。

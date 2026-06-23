@@ -1,8 +1,9 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { CONTEXT_PATH } from '@/context'
 
 const router = createRouter({
-  history: createWebHistory(),
+  history: createWebHistory(CONTEXT_PATH || '/'),
   routes: [
     {
       path: '/login',

@@ -1,8 +1,10 @@
 import axios from 'axios'
+import { appPath } from '@/context'
 
 // Same-origin in production (embedded), proxied to :3000 in dev via vite config.
+// baseURL is context-path aware so requests work under a sub-path like /webssh.
 export const http = axios.create({
-  baseURL: '/api',
+  baseURL: appPath('api'),
   withCredentials: true, // send + receive the session cookie
   timeout: 30000,
 })

@@ -2,6 +2,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
+import { CONTEXT_PATH } from '@/context'
 
 /**
  * A terminal session keeps its WebSocket and xterm instance alive for the whole
@@ -39,8 +40,11 @@ let counter = 0
 
 function terminalUrl(connectionId: number, cols: number, rows: number): string {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+  // Insert the context path between host and the api path so WebSocket
+  // connects under the same sub-path as the app.
+  const apiPath = CONTEXT_PATH === '' ? '/api/terminal/connect' : `${CONTEXT_PATH}/api/terminal/connect`
   return (
-    `${proto}//${location.host}/api/terminal/connect` +
+    `${proto}//${location.host}${apiPath}` +
     `?connection_id=${connectionId}&cols=${cols}&rows=${rows}`
   )
 }

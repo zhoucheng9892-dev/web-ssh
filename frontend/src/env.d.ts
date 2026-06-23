@@ -5,3 +5,9 @@ declare module '*.vue' {
   const component: DefineComponent<{}, {}, any>
   export default component
 }
+
+// Injected by the backend into index.html (e.g. "/webssh"); "" for root deploy.
+interface Window {
+  __CONTEXT_PATH__?: string
+}
+

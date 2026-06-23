@@ -21,6 +21,8 @@ services:
       WEBSSH_SESSION_TTL_SECS: 604800
       # Terminal idle timeout in seconds (0 = never disconnect on idle).
       WEBSSH_TERMINAL_IDLE_TIMEOUT_SECS: 0
+      # Sub-path to serve under, e.g. "/webssh". Empty = root deployment.
+      WEBSSH_CONTEXT_PATH: /webssh
       # Override WEBSSH_DATA_DIR or WEBSSH_DATABASE_URL here if you prefer a
       # different layout. Defaults to /app/data.
       # WEBSSH_DATA_DIR: /app/data

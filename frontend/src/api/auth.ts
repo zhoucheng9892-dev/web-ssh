@@ -1,4 +1,5 @@
 import { http } from './client'
+import { sha256Hex } from '@/utils/hash'
 
 export interface Me {
   id: number
@@ -18,11 +19,21 @@ export const authApi = {
   status: () => http.get<AuthStatus>('/auth/status').then((r) => r.data),
   me: () => http.get<Me>('/auth/me').then((r) => r.data),
   captcha: () => http.get<CaptchaImage>('/auth/captcha').then((r) => r.data),
+  // Passwords are SHA-256 hashed on the client; the backend applies Argon2id
+  // on top. Plaintext never leaves the browser.
   login: (username: string, password: string, captcha: string) =>
-    http.post<Me>('/auth/login', { username, password, captcha }).then((r) => r.data),
+    sha256Hex(password).then((hp) =>
+      http.post<Me>('/auth/login', { username, password: hp, captcha }).then((r) => r.data),
+    ),
   setup: (username: string, password: string) =>
-    http.post<Me>('/auth/setup', { username, password }).then((r) => r.data),
+    sha256Hex(password).then((hp) =>
+      http.post<Me>('/auth/setup', { username, password: hp }).then((r) => r.data),
+    ),
   logout: () => http.post('/auth/logout').then((r) => r.data),
   changePassword: (oldPassword: string, newPassword: string) =>
-    http.post('/auth/password', { old_password: oldPassword, new_password: newPassword }).then((r) => r.data),
+    Promise.all([sha256Hex(oldPassword), sha256Hex(newPassword)]).then(([oldHp, newHp]) =>
+      http
+        .post('/auth/password', { old_password: oldHp, new_password: newHp })
+        .then((r) => r.data),
+    ),
 }

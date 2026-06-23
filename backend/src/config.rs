@@ -30,6 +30,9 @@ pub struct Config {
     /// idle (the default). When > 0, a terminal with no traffic for this long
     /// is considered dead and closed. A keepalive heartbeat always runs.
     pub terminal_idle_timeout_secs: u64,
+    /// Sub-path to serve the app under, e.g. "/webssh". Empty = root
+    /// deployment. Normalized to start with "/" and have no trailing slash.
+    pub context_path: String,
 }
 
 impl Config {
@@ -78,6 +81,8 @@ impl Config {
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(0);
+        // Context path: sub-path to serve under, e.g. "/webssh". Empty = root.
+        let context_path = normalize_context_path(&std::env::var("WEBSSH_CONTEXT_PATH").unwrap_or_default());
 
         // Ensure secret keys exist; generate + persist on first run.
         ensure_secret("WEBSSH_MASTER_KEY", 32, &env_path)?;
@@ -95,6 +100,7 @@ impl Config {
             session_key,
             session_ttl_secs,
             terminal_idle_timeout_secs,
+            context_path,
         })
     }
 }
@@ -107,6 +113,27 @@ fn derive_db_path(url: &str) -> Result<PathBuf> {
         .unwrap_or(url);
     let path = path.split('?').next().unwrap_or(path);
     Ok(PathBuf::from(path))
+}
+
+/// Normalize a context path: trim whitespace, strip any trailing slashes,
+/// ensure a leading "/", and collapse repeated slashes. "" or "/" → "" (root).
+/// e.g. "webssh/", "/webssh", "/webssh/" all become "/webssh".
+fn normalize_context_path(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() || trimmed == "/" {
+        return String::new();
+    }
+    let with_leading = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    };
+    // Collapse any accidental "//" runs (repeat until stable).
+    let mut out = with_leading;
+    while out.contains("//") {
+        out = out.replace("//", "/");
+    }
+    out
 }
 
 /// The data directory holding the SQLite database and generated `.env`.

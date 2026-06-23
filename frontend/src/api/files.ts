@@ -1,4 +1,5 @@
 import { http } from './client'
+import { appPath } from '@/context'
 
 export interface FileEntry {
   name: string
@@ -39,5 +40,5 @@ export const filesApi = {
 
   /** Full download URL (lets the browser stream the file directly). */
   downloadUrl: (connectionId: number, path: string) =>
-    `/api/files/download?connection_id=${connectionId}&path=${encodeURIComponent(path)}`,
+    `${appPath('api/files/download')}?connection_id=${connectionId}&path=${encodeURIComponent(path)}`,
 }
