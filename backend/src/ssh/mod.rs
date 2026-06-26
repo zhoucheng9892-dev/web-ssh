@@ -130,7 +130,22 @@ async fn try_password_auth(
 /// Establish a fresh TCP + SSH handshake. Factored out so each auth attempt
 /// starts from a clean session state (see [`connect`] for why this matters).
 async fn dial(host: &str, port: u16) -> Result<client::Handle<ClientHandler>> {
-    let config = Arc::new(client::Config { ..Default::default() });
+    let config = Arc::new(client::Config {
+        // The default `maximum_packet_size` (32 KiB) caps how much payload a
+        // single SSH data packet can carry. russh's channel writer sends at
+        // most one such packet per round-trip before awaiting the server's
+        // window adjust, so with the default this degenerates into
+        // stop-and-wait: 32 KiB / RTT ≈ 160 KB/s on a 200 ms LAN link, which
+        // matches the ~150 KB/s observed for large SFTP uploads. Raising it to
+        // 1 MiB lets each round-trip carry 32× more data, bringing throughput
+        // back to the bandwidth limit. SSH only mandates a 32 KiB minimum
+        // (RFC 4253 §6.1) and OpenSSH's per-channel limit is well above this.
+        maximum_packet_size: 1024 * 1024,
+        // Keep enough window credit in flight to keep the pipeline full: ~4
+        // maximum-sized packets outstanding before we must wait for an adjust.
+        window_size: 4 * 1024 * 1024,
+        ..Default::default()
+    });
     let handler = ClientHandler;
     tokio::time::timeout(HANDSHAKE_TIMEOUT, client::connect(config, (host, port), handler))
         .await

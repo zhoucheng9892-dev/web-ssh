@@ -157,8 +157,6 @@ pub async fn upload(
     mut multipart: Multipart,
 ) -> AppResult<impl IntoResponse> {
     let dir = q.path.clone().unwrap_or_else(|| ".".to_string());
-    // Cache the SFTP handle up front so we can lock+write inside the loop while
-    // the multipart is borrowed; the Arc clone lets us hand it into each chunk.
     let sftp = get_sftp(&state, user.0, q.connection_id).await?;
     let mut uploaded: Vec<String> = Vec::new();
 
@@ -174,16 +172,19 @@ pub async fn upload(
             .to_string();
         let target = join_remote(&dir, &name);
 
-        // Create the remote file under a short lock, then stream chunks.
-        {
+        // Open the remote file under a short lock (creating it is a single
+        // SFTP request). The returned `File` holds its own `Arc` to the
+        // session channel, so we drop the lock immediately and stream the
+        // (potentially very large) body without blocking other file ops on
+        // this connection.
+        let remote = {
             let mut guard = sftp.lock().await;
             let s = guard.as_mut().unwrap();
-            let remote = s
-                .create(&target)
+            s.create(&target)
                 .await
-                .map_err(|e| AppError::BadRequest(format!("create {target}: {e}")))?;
-            stream_field_to(remote, field, &target).await?;
-        }
+                .map_err(|e| AppError::BadRequest(format!("create {target}: {e}")))?
+        };
+        stream_field_to(remote, field, &target).await?;
         uploaded.push(target);
     }
 
@@ -192,27 +193,58 @@ pub async fn upload(
 
 /// Drain a multipart field into an open SFTP file using `AsyncWrite`.
 ///
-/// Held while the SFTP cache lock is taken by the caller so we serialise
-/// subsystem access across concurrent uploads to the same connection.
+/// Called without the SFTP cache lock held: the `File` owns a session handle
+/// so writes proceed independently of other operations on the connection.
 async fn stream_field_to(
     mut remote: russh_sftp::client::fs::File,
     mut field: axum::extract::multipart::Field<'_>,
     label: &str,
 ) -> AppResult<()> {
-    while let Some(chunk) = field
-        .chunk()
-        .await
-        .map_err(|e| AppError::BadRequest(format!("read field: {e}")))?
-    {
+    use std::time::Instant;
+    let start = Instant::now();
+    let mut total = 0u64;
+    let mut read_ms: u128 = 0;
+    let mut write_ms: u128 = 0;
+    let mut chunks = 0u64;
+    while let Some(chunk) = {
+        let t = Instant::now();
+        let c = field
+            .chunk()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("read field: {e}")))?;
+        read_ms += t.elapsed().as_millis();
+        c
+    } {
+        let len = chunk.len();
+        let t = Instant::now();
         remote
             .write_all(&chunk)
             .await
             .map_err(|e| AppError::BadRequest(format!("write {label}: {e}")))?;
+        write_ms += t.elapsed().as_millis();
+        total += len as u64;
+        chunks += 1;
+        if chunks % 64 == 0 {
+            tracing::info!(
+                %label, chunks, total_kb = total / 1024,
+                read_ms, write_ms,
+                chunk_bytes = len,
+                "upload transfer stats",
+            );
+        }
     }
+    let t = Instant::now();
     remote
         .flush()
         .await
         .map_err(|e| AppError::BadRequest(format!("flush {label}: {e}")))?;
+    tracing::info!(
+        %label, chunks, total_kb = total / 1024,
+        read_ms, write_ms,
+        flush_ms = t.elapsed().as_millis(),
+        total_ms = start.elapsed().as_millis(),
+        "upload transfer done",
+    );
     // File closes on drop.
     Ok(())
 }

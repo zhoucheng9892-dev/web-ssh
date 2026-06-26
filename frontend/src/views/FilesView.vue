@@ -3,9 +3,35 @@ import { onActivated, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   filesApi,
+  uploadWithProgress,
   type FileEntry,
 } from '@/api/files'
 import { connectionsApi, type Connection } from '@/api/connections'
+
+/** Status of a single file in the upload queue. */
+type UploadStatus = 'pending' | 'uploading' | 'done' | 'error' | 'cancelled'
+
+interface UploadTask {
+  id: number
+  file: File
+  /** 0..100. */
+  percent: number
+  status: UploadStatus
+  /** Bytes uploaded so far. */
+  loaded: number
+  /** Human-readable speed, refreshed while uploading. */
+  speed: string
+  /** Last progress timestamp + bytes, for computing speed. */
+  lastTickAt: number
+  lastTickLoaded: number
+  error?: string
+  /** Abort handle for the in-flight upload. */
+  abort?: () => void
+}
+
+let taskSeq = 0
+const uploadTasks = ref<UploadTask[]>([])
+let uploading = false
 
 const connections = ref<Connection[]>([])
 const connectionId = ref<number | null>(null)
@@ -116,25 +142,93 @@ async function mkdir() {
   }
 }
 
-function onUpload(ev: any) {
-  const files: File[] = Array.from(ev.file?.fileList ? [] : [ev.file]).filter(
-    Boolean,
-  ) as File[]
-  // el-upload passes { file } in http-request override; use raw input instead.
-}
-
-async function onFilePicked(ev: Event) {
+/** Queue files picked from the input and start the serial uploader. */
+function onFilePicked(ev: Event) {
   const input = ev.target as HTMLInputElement
   if (!input.files || input.files.length === 0 || connectionId.value === null) return
-  try {
-    await filesApi.upload(connectionId.value, cwd.value, Array.from(input.files))
-    ElMessage.success(`已上传 ${input.files.length} 个文件`)
-    load()
-  } catch (e: any) {
-    ElMessage.error(e.message)
-  } finally {
-    input.value = ''
+  for (const file of Array.from(input.files)) {
+    uploadTasks.value.push({
+      id: ++taskSeq,
+      file,
+      percent: 0,
+      status: 'pending',
+      loaded: 0,
+      speed: '',
+      lastTickAt: 0,
+      lastTickLoaded: 0,
+    })
   }
+  input.value = ''
+  void runUploadQueue()
+}
+
+/** Upload queued files one at a time to keep SFTP happy and progress clear. */
+async function runUploadQueue() {
+  if (uploading) return
+  uploading = true
+  try {
+    while (true) {
+      const task = uploadTasks.value.find((t) => t.status === 'pending')
+      if (!task || connectionId.value === null) break
+      task.status = 'uploading'
+      task.lastTickAt = Date.now()
+      task.lastTickLoaded = 0
+      const { promise, abort } = uploadWithProgress(
+        connectionId.value,
+        cwd.value,
+        task.file,
+        (p) => updateProgress(task, p),
+      )
+      task.abort = abort
+      try {
+        await promise
+        task.status = 'done'
+        task.percent = 100
+        task.speed = ''
+      } catch (e: any) {
+        task.status = e.message === '已取消' ? 'cancelled' : 'error'
+        task.error = e.message
+        ElMessage.error(`${task.file.name}: ${e.message}`)
+      }
+    }
+    // Refresh the listing once the queue drains (any completions happened).
+    if (uploadTasks.value.some((t) => t.status === 'done')) {
+      load()
+    }
+  } finally {
+    uploading = false
+  }
+}
+
+/** Update a task's progress bar and compute the transfer speed. */
+function updateProgress(task: UploadTask, p: { loaded: number; total: number; ratio: number }) {
+  const now = Date.now()
+  task.loaded = p.loaded
+  task.percent = p.total > 0 ? Math.min(100, Math.round(p.ratio * 100)) : 0
+  const dt = now - task.lastTickAt
+  if (dt >= 500 && task.lastTickAt > 0) {
+    const dBytes = p.loaded - task.lastTickLoaded
+    const bps = (dBytes * 1000) / dt
+    task.speed = `${fmtSize(bps)}/s`
+    task.lastTickAt = now
+    task.lastTickLoaded = p.loaded
+  }
+}
+
+/** Cancel an in-flight upload or remove a finished/failed task from the list. */
+function cancelTask(task: UploadTask) {
+  if (task.status === 'uploading') {
+    task.abort?.()
+    return
+  }
+  uploadTasks.value = uploadTasks.value.filter((t) => t.id !== task.id)
+}
+
+/** Clear all finished/failed/cancelled tasks from the list. */
+function clearFinished() {
+  uploadTasks.value = uploadTasks.value.filter(
+    (t) => t.status === 'pending' || t.status === 'uploading',
+  )
 }
 
 function fmtSize(n: number) {
@@ -206,6 +300,41 @@ onActivated(async () => {
         <span class="sep">/</span>
         <span class="crumb" @click="goTo(i)"><a>{{ p }}</a></span>
       </template>
+    </div>
+
+    <div v-if="uploadTasks.length" class="upload-queue">
+      <div class="queue-head">
+        <span>上传队列（{{ uploadTasks.length }}）</span>
+        <el-button size="small" text @click="clearFinished">清除已完成</el-button>
+      </div>
+      <div v-for="task in uploadTasks" :key="task.id" class="queue-item">
+        <div class="queue-info">
+          <span class="queue-name" :title="task.file.name">{{ task.file.name }}</span>
+          <span class="queue-meta">
+            {{ fmtSize(task.file.size) }}
+            <template v-if="task.status === 'uploading' && task.speed">· {{ task.speed }}</template>
+            <template v-if="task.status === 'done'">· 完成</template>
+            <template v-if="task.status === 'error'">· {{ task.error }}</template>
+            <template v-if="task.status === 'cancelled'">· 已取消</template>
+            <template v-if="task.status === 'pending'">· 等待中</template>
+          </span>
+        </div>
+        <el-progress
+          :percentage="task.percent"
+          :status="task.status === 'done' ? 'success' : task.status === 'error' ? 'exception' : undefined"
+          :stroke-width="8"
+          :show-text="true"
+          class="queue-bar"
+        />
+        <el-button
+          size="small"
+          text
+          :type="task.status === 'uploading' ? 'danger' : undefined"
+          @click="cancelTask(task)"
+        >
+          {{ task.status === 'uploading' ? '取消' : '移除' }}
+        </el-button>
+      </div>
     </div>
 
     <div class="table-wrap">
@@ -289,6 +418,58 @@ onActivated(async () => {
 }
 .sep {
   opacity: 0.5;
+}
+.upload-queue {
+  padding: 10px 20px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.queue-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 13px;
+}
+.queue-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  gap: 4px 12px;
+  align-items: center;
+}
+.queue-info {
+  min-width: 0;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 13px;
+}
+.queue-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.queue-meta {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.queue-bar {
+  width: 100%;
+}
+/* Place the cancel/remove button in the top-right cell. */
+.queue-item > .el-button {
+  grid-row: 1;
+  grid-column: 2;
+}
+/* Progress bar spans the full width under the info row. */
+.queue-item > .el-progress {
+  grid-row: 2;
+  grid-column: 1 / -1;
 }
 .table-wrap {
   flex: 1;

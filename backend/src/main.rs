@@ -107,7 +107,14 @@ fn build_router(state: AppState, context_path: &str) -> Router {
         .nest("/users", users::router())
         .route("/files/list", get(files::list))
         .route("/files/download", get(files::download))
-        .route("/files/upload", post(files::upload))
+        // Multipart upload needs an uncapped body: axum's `Multipart` defaults
+        // to a 2MB limit, which rejects large file uploads outright. Disable
+        // the limit for this one route (SFTP writes are streamed to disk, so
+        // memory stays flat regardless of size).
+        .route(
+            "/files/upload",
+            post(files::upload).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
         .route("/files/mkdir", post(files::mkdir))
         .route("/files", axum::routing::delete(files::remove))
         .route("/terminal/connect", get(terminal::connect))
