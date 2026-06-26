@@ -107,19 +107,11 @@ fn build_router(state: AppState, context_path: &str) -> Router {
         .nest("/users", users::router())
         .route("/files/list", get(files::list))
         .route("/files/download", get(files::download))
-        // Multipart upload needs an uncapped body: axum's `Multipart` defaults
-        // to a 2MB limit, which rejects large file uploads outright. Disable
-        // the limit for this one route (SFTP writes are streamed to disk, so
-        // memory stays flat regardless of size).
-        .route(
-            "/files/upload",
-            post(files::upload).layer(axum::extract::DefaultBodyLimit::disable()),
-        )
+        // Body limit is disabled app-wide below (after build_router) so large
+        // file uploads/chunks aren't rejected by axum's default 2MB cap.
+        .route("/files/upload", post(files::upload))
         .route("/files/upload-status", get(files::upload_status))
-        .route(
-            "/files/upload-chunk",
-            post(files::upload_chunk).layer(axum::extract::DefaultBodyLimit::disable()),
-        )
+        .route("/files/upload-chunk", post(files::upload_chunk))
         .route("/files/mkdir", post(files::mkdir))
         .route("/files", axum::routing::delete(files::remove))
         .route("/terminal/connect", get(terminal::connect))
@@ -131,6 +123,7 @@ fn build_router(state: AppState, context_path: &str) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         // SPA: serve embedded assets, fall back to index.html for client routes.
         .fallback(move |uri: Uri| static_handler(uri, ctx.clone()))
+        .layer(axum::extract::DefaultBodyLimit::disable())
         .with_state(state);
 
     if context_path.is_empty() {

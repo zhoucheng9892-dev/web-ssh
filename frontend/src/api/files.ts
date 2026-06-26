@@ -231,21 +231,21 @@ export function uploadChunked(
 
 /** Send one chunk via XHR, return the confirmed new offset and an abort handle. */
 function chunkRequest(url: string, blob: Blob): { promise: Promise<ChunkAckResult>; abort: () => void } {
-  const xhr = new XMLHttpRequest()
-  xhr.open('POST', url)
-  xhr.withCredentials = true
-  xhr.responseType = 'json'
-  const promise = new Promise<ChunkAckResult>((resolve, reject) => {
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(xhr.response as ChunkAckResult)
-      } else {
-        reject(new Error(xhr.response?.error || `上传失败（HTTP ${xhr.status}）`))
-      }
+  const controller = new AbortController()
+  const promise = fetch(url, {
+    method: 'POST',
+    credentials: 'include',
+    body: blob,
+    signal: controller.signal,
+    // Don't let the browser auto-set Content-Type from the blob's type — send
+    // as raw binary so the backend's Bytes extractor sees the raw octets.
+    headers: { 'Content-Type': 'application/octet-stream' },
+  }).then(async (res) => {
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(body.error || `上传失败（HTTP ${res.status}）`)
     }
-    xhr.onerror = () => reject(new Error('网络错误'))
-    xhr.onabort = () => reject(new Error('已取消'))
+    return res.json() as Promise<ChunkAckResult>
   })
-  xhr.send(blob)
-  return { promise, abort: () => xhr.abort() }
+  return { promise, abort: () => controller.abort() }
 }

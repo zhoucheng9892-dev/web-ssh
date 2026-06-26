@@ -26,6 +26,15 @@ services:
       # Override WEBSSH_DATA_DIR or WEBSSH_DATABASE_URL here if you prefer a
       # different layout. Defaults to /app/data.
       # WEBSSH_DATA_DIR: /app/data
+    networks:
+      - webssh-net
+
+networks:
+  webssh-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.200.0.0/24
 
 volumes:
   webssh-data:

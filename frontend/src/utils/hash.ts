@@ -3,14 +3,13 @@
 // before storing, so the DB never holds anything reversible and plaintext
 // passwords never appear in logs / request bodies.
 //
-// We use the browser's native Web Crypto API (no deps, available in all
-// evergreen browsers and secure contexts). The result is a lowercase hex string.
+// We use js-sha256, a pure-JS implementation that works in ALL browser
+// environments without requiring Web Crypto API (crypto.subtle is only
+// available in "secure contexts" which some Chrome configs block on HTTP).
+
+import { sha256 } from 'js-sha256'
 
 /** Compute SHA-256(input) and return it as a lowercase hex string. */
 export async function sha256Hex(input: string): Promise<string> {
-  const data = new TextEncoder().encode(input)
-  const digest = await crypto.subtle.digest('SHA-256', data)
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('')
+  return sha256(input)
 }
