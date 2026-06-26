@@ -7,15 +7,14 @@
 use std::sync::Arc;
 
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{Multipart, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::Mutex;
 use tracing::warn;
 
@@ -42,6 +41,43 @@ pub struct PathQuery {
     /// Remote directory to list, or remote file path for stat. Defaults to ".".
     #[serde(default)]
     pub path: Option<String>,
+}
+
+/// Query for chunked-upload status check.
+#[derive(Deserialize)]
+pub struct ChunkStatusQuery {
+    connection_id: i64,
+    /// Remote directory (defaults to ".").
+    #[serde(default)]
+    path: Option<String>,
+    /// Target filename inside `path`.
+    filename: String,
+}
+
+/// Query for a single chunk upload.
+#[derive(Deserialize)]
+pub struct ChunkQuery {
+    connection_id: i64,
+    #[serde(default)]
+    path: Option<String>,
+    filename: String,
+    /// Byte offset at which to write this chunk.
+    offset: u64,
+}
+
+/// Response body for upload-status.
+#[derive(Serialize)]
+struct ChunkStatus {
+    exists: bool,
+    /// Current file size in bytes on the remote. 0 when `exists` is false.
+    size: u64,
+}
+
+/// Response body for upload-chunk.
+#[derive(Serialize)]
+struct ChunkAck {
+    /// New file size after this chunk was written (= old offset + chunk len).
+    offset: u64,
 }
 
 #[derive(Serialize)]
@@ -200,53 +236,109 @@ async fn stream_field_to(
     mut field: axum::extract::multipart::Field<'_>,
     label: &str,
 ) -> AppResult<()> {
-    use std::time::Instant;
-    let start = Instant::now();
-    let mut total = 0u64;
-    let mut read_ms: u128 = 0;
-    let mut write_ms: u128 = 0;
-    let mut chunks = 0u64;
-    while let Some(chunk) = {
-        let t = Instant::now();
-        let c = field
-            .chunk()
-            .await
-            .map_err(|e| AppError::BadRequest(format!("read field: {e}")))?;
-        read_ms += t.elapsed().as_millis();
-        c
-    } {
-        let len = chunk.len();
-        let t = Instant::now();
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("read field: {e}")))?
+    {
         remote
             .write_all(&chunk)
             .await
             .map_err(|e| AppError::BadRequest(format!("write {label}: {e}")))?;
-        write_ms += t.elapsed().as_millis();
-        total += len as u64;
-        chunks += 1;
-        if chunks % 64 == 0 {
-            tracing::info!(
-                %label, chunks, total_kb = total / 1024,
-                read_ms, write_ms,
-                chunk_bytes = len,
-                "upload transfer stats",
-            );
-        }
     }
-    let t = Instant::now();
     remote
         .flush()
         .await
         .map_err(|e| AppError::BadRequest(format!("flush {label}: {e}")))?;
-    tracing::info!(
-        %label, chunks, total_kb = total / 1024,
-        read_ms, write_ms,
-        flush_ms = t.elapsed().as_millis(),
-        total_ms = start.elapsed().as_millis(),
-        "upload transfer done",
-    );
     // File closes on drop.
     Ok(())
+}
+
+/// `GET /api/files/upload-status?connection_id=&path=&filename=`
+///
+/// Check whether a remote file exists and return its current size. The client
+/// uses this to decide where to resume a chunked upload.
+pub async fn upload_status(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Query(q): Query<ChunkStatusQuery>,
+) -> AppResult<impl IntoResponse> {
+    let dir = q.path.clone().unwrap_or_else(|| ".".to_string());
+    let target = join_remote(&dir, &q.filename);
+    let sftp = get_sftp(&state, user.0, q.connection_id).await?;
+    let guard = sftp.lock().await;
+    let s = guard.as_ref().unwrap();
+    match s
+        .open_with_flags(&target, russh_sftp::protocol::OpenFlags::READ)
+        .await
+    {
+        Ok(file) => {
+            let meta = file
+                .metadata()
+                .await
+                .map_err(|e| AppError::BadRequest(format!("stat {target}: {e}")))?;
+            tracing::debug!(%target, size = meta.len(), "upload-status: file exists");
+            Ok(Json(ChunkStatus {
+                exists: true,
+                size: meta.len(),
+            }))
+        }
+        Err(e) => {
+            tracing::debug!(%target, error = %e, "upload-status: open failed, treating as not found");
+            Ok(Json(ChunkStatus {
+                exists: false,
+                size: 0,
+            }))
+        }
+    }
+}
+
+/// `POST /api/files/upload-chunk?connection_id=&path=&filename=&offset=N`
+///
+/// Append a single chunk of binary data at a specific byte offset. The file is
+/// created on first write (CREATE | WRITE, no TRUNCATE). Called sequentially
+/// by the frontend with a fixed-size slice of the source file, so a crash or
+/// cancel after chunk K can be resumed by re-uploading only chunks K+1..N.
+pub async fn upload_chunk(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Query(q): Query<ChunkQuery>,
+    body: Bytes,
+) -> AppResult<impl IntoResponse> {
+    let dir = q.path.clone().unwrap_or_else(|| ".".to_string());
+    let target = join_remote(&dir, &q.filename);
+    let sftp = get_sftp(&state, user.0, q.connection_id).await?;
+
+    // Open or create the file. CREATE | WRITE without TRUNCATE means an
+    // existing file is opened at offset 0 but its content is preserved —
+    // we'll seek to `q.offset` before writing.
+    let mut file = {
+        let guard = sftp.lock().await;
+        let s = guard.as_ref().unwrap();
+        s.open_with_flags(
+            &target,
+            russh_sftp::protocol::OpenFlags::CREATE
+                | russh_sftp::protocol::OpenFlags::WRITE,
+        )
+        .await
+        .map_err(|e| AppError::BadRequest(format!("open {target}: {e}")))?
+    };
+
+    let len = body.len();
+    file.seek(SeekFrom::Start(q.offset))
+        .await
+        .map_err(|e| AppError::BadRequest(format!("seek {target}: {e}")))?;
+    file.write_all(&body)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("write {target}: {e}")))?;
+    file.flush()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("flush {target}: {e}")))?;
+
+    tracing::debug!(%target, offset = q.offset, len, "chunk written");
+    Ok(Json(ChunkAck {
+        offset: q.offset + len as u64,
+    }))
 }
 
 /// `POST /api/files/mkdir?connection_id=&path=`

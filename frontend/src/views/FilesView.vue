@@ -3,13 +3,13 @@ import { onActivated, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   filesApi,
-  uploadWithProgress,
+  uploadChunked,
   type FileEntry,
 } from '@/api/files'
 import { connectionsApi, type Connection } from '@/api/connections'
 
 /** Status of a single file in the upload queue. */
-type UploadStatus = 'pending' | 'uploading' | 'done' | 'error' | 'cancelled'
+type UploadStatus = 'pending' | 'uploading' | 'done' | 'error' | 'cancelled' | 'paused'
 
 interface UploadTask {
   id: number
@@ -173,7 +173,7 @@ async function runUploadQueue() {
       task.status = 'uploading'
       task.lastTickAt = Date.now()
       task.lastTickLoaded = 0
-      const { promise, abort } = uploadWithProgress(
+      const { promise, abort } = uploadChunked(
         connectionId.value,
         cwd.value,
         task.file,
@@ -186,9 +186,14 @@ async function runUploadQueue() {
         task.percent = 100
         task.speed = ''
       } catch (e: any) {
-        task.status = e.message === '已取消' ? 'cancelled' : 'error'
-        task.error = e.message
-        ElMessage.error(`${task.file.name}: ${e.message}`)
+        const cancelled = e.message === '已取消'
+        task.status = cancelled ? 'paused' : 'error'
+        task.error = cancelled ? undefined : e.message
+        if (cancelled) {
+          task.speed = ''
+        } else {
+          ElMessage.error(`${task.file.name}: ${e.message}`)
+        }
       }
     }
     // Refresh the listing once the queue drains (any completions happened).
@@ -215,19 +220,29 @@ function updateProgress(task: UploadTask, p: { loaded: number; total: number; ra
   }
 }
 
-/** Cancel an in-flight upload or remove a finished/failed task from the list. */
-function cancelTask(task: UploadTask) {
+/** Pause / resume / retry / remove — depends on current task status. */
+function toggleTask(task: UploadTask) {
   if (task.status === 'uploading') {
+    // Pause — abort the current chunk; runUploadQueue sets status to 'paused'.
     task.abort?.()
     return
   }
+  if (task.status === 'paused' || task.status === 'cancelled' || task.status === 'error') {
+    // Resume / retry — put back into queue. uploadChunked will skip already-
+    // written bytes by querying upload-status internally.
+    task.status = 'pending'
+    task.error = undefined
+    void runUploadQueue()
+    return
+  }
+  // done / pending — just remove.
   uploadTasks.value = uploadTasks.value.filter((t) => t.id !== task.id)
 }
 
-/** Clear all finished/failed/cancelled tasks from the list. */
+/** Clear all finished/failed/cancelled tasks from the list (keep paused). */
 function clearFinished() {
   uploadTasks.value = uploadTasks.value.filter(
-    (t) => t.status === 'pending' || t.status === 'uploading',
+    (t) => t.status === 'pending' || t.status === 'uploading' || t.status === 'paused',
   )
 }
 
@@ -316,12 +331,13 @@ onActivated(async () => {
             <template v-if="task.status === 'done'">· 完成</template>
             <template v-if="task.status === 'error'">· {{ task.error }}</template>
             <template v-if="task.status === 'cancelled'">· 已取消</template>
+            <template v-if="task.status === 'paused'">· 已暂停</template>
             <template v-if="task.status === 'pending'">· 等待中</template>
           </span>
         </div>
         <el-progress
           :percentage="task.percent"
-          :status="task.status === 'done' ? 'success' : task.status === 'error' ? 'exception' : undefined"
+          :status="task.status === 'done' ? 'success' : task.status === 'error' ? 'exception' : task.status === 'paused' ? 'warning' : undefined"
           :stroke-width="8"
           :show-text="true"
           class="queue-bar"
@@ -329,10 +345,12 @@ onActivated(async () => {
         <el-button
           size="small"
           text
-          :type="task.status === 'uploading' ? 'danger' : undefined"
-          @click="cancelTask(task)"
+          :type="task.status === 'uploading' ? 'warning' : (task.status === 'paused' || task.status === 'cancelled' || task.status === 'error') ? 'primary' : undefined"
+          @click="toggleTask(task)"
         >
-          {{ task.status === 'uploading' ? '取消' : '移除' }}
+          <template v-if="task.status === 'uploading'">暂停</template>
+          <template v-else-if="task.status === 'paused' || task.status === 'cancelled' || task.status === 'error'">继续</template>
+          <template v-else>移除</template>
         </el-button>
       </div>
     </div>

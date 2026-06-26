@@ -115,6 +115,11 @@ fn build_router(state: AppState, context_path: &str) -> Router {
             "/files/upload",
             post(files::upload).layer(axum::extract::DefaultBodyLimit::disable()),
         )
+        .route("/files/upload-status", get(files::upload_status))
+        .route(
+            "/files/upload-chunk",
+            post(files::upload_chunk).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
         .route("/files/mkdir", post(files::mkdir))
         .route("/files", axum::routing::delete(files::remove))
         .route("/terminal/connect", get(terminal::connect))
