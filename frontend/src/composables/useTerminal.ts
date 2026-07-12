@@ -119,6 +119,20 @@ export function openSession(connectionId: number, title: string): TerminalSessio
   ws.binaryType = 'arraybuffer'
   session.ws = ws
 
+  // THE critical fix: the PTY was opened at 80×24 (from the WS URL), but the
+  // real terminal size is measured by fit() when the pane is attached — which
+  // usually happens *before* the WebSocket finishes its handshake. Without
+  // this, onResize fires while ws is still CONNECTING, the resize is silently
+  // dropped, and the PTY stays at 80×24 forever. The shell's readline then
+  // wraps text at 80 columns while xterm.js renders at the real width. Pasting
+  // a long line and pressing an arrow key makes readline repaint with the wrong
+  // column count → text duplicated, cursor in the wrong place.
+  ws.onopen = () => {
+    if (session.cols && session.rows) {
+      ws.send(JSON.stringify({ type: 'resize', cols: session.cols, rows: session.rows }))
+    }
+  }
+
   ws.onmessage = (ev) => {
     session.everOpened = true
     if (typeof ev.data === 'string') {
@@ -168,10 +182,20 @@ export function openSession(connectionId: number, title: string): TerminalSessio
     }
   }
 
+  // All outbound data goes through one serial queue so keystrokes and paste
+  // data never interleave on the WebSocket.
+  let sendChain: Promise<void> = Promise.resolve()
+  const encoder = new TextEncoder()
+
   terminal.onData((data) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(new TextEncoder().encode(data))
-    }
+    if (ws.readyState !== WebSocket.OPEN) return
+    sendChain = sendChain
+      .then(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(encoder.encode(data))
+        }
+      })
+      .catch(() => {})
   })
   terminal.onResize(({ cols, rows }) => {
     session.cols = cols
@@ -220,14 +244,23 @@ export function detachSession(session: TerminalSession) {
   session.pane = null
 }
 
-/** Re-fit after the container resizes (call on window resize / tab switch). */
+/** Re-fit after the container resizes (call on window resize / tab switch).
+ *  Debounced per session: rapid tab switches / window drags fire multiple fit()
+ *  calls that each trigger a PTY resize round-trip; without debouncing the
+ *  remote can process a stale size, desyncing the geometry. */
+const refitTimers = new WeakMap<TerminalSession, ReturnType<typeof setTimeout>>()
 export function refit(session: TerminalSession) {
   if (!session.pane) return
-  try {
-    session.fit.fit()
-  } catch {
-    /* terminal not yet open */
-  }
+  const existing = refitTimers.get(session)
+  if (existing) clearTimeout(existing)
+  const timer = setTimeout(() => {
+    try {
+      session.fit.fit()
+    } catch {
+      /* terminal not yet open */
+    }
+  }, 100)
+  refitTimers.set(session, timer)
 }
 
 /** Fully close a session: tear down the websocket and dispose the terminal. */

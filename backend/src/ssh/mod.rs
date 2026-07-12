@@ -257,16 +257,45 @@ pub async fn open_shell(
         .channel_open_session()
         .await
         .map_err(|e| anyhow!("open session channel: {e}"))?;
+    // Standard terminal modes that OpenSSH's ssh client sets on every PTY.
+    // Previously we only set ECHO=1, which left OPOST/ONLCR unset: the shell's
+    // output processing was disabled, so `\n` was not translated to `\r\n`.
+    // When readline redraws a wrapped line (e.g. after pressing an arrow key
+    // with a long pasted line in the buffer), its control sequences assumed
+    // standard output processing but the PTY wasn't doing it — the cursor
+    // position and line wrapping desynced, garbling the display.
+    let modes = [
+        (russh::Pty::VINTR, 3),
+        (russh::Pty::VQUIT, 28),
+        (russh::Pty::VERASE, 127),
+        (russh::Pty::VKILL, 21),
+        (russh::Pty::VEOF, 4),
+        (russh::Pty::VEOL, 0),
+        (russh::Pty::VEOL2, 0),
+        (russh::Pty::VSTART, 17),
+        (russh::Pty::VSTOP, 19),
+        (russh::Pty::VSUSP, 26),
+        (russh::Pty::VREPRINT, 18),
+        (russh::Pty::VWERASE, 23),
+        (russh::Pty::VLNEXT, 22),
+        (russh::Pty::VDISCARD, 15),
+        (russh::Pty::IUTF8, 1),
+        (russh::Pty::ISIG, 1),
+        (russh::Pty::ICANON, 1),
+        (russh::Pty::ECHO, 1),
+        (russh::Pty::ECHOE, 1),
+        (russh::Pty::ECHOK, 1),
+        (russh::Pty::ECHONL, 0),
+        (russh::Pty::NOFLSH, 0),
+        (russh::Pty::IEXTEN, 1),
+        (russh::Pty::ECHOCTL, 1),
+        (russh::Pty::ECHOKE, 1),
+        (russh::Pty::PENDIN, 0),
+        (russh::Pty::OPOST, 1),
+        (russh::Pty::ONLCR, 1),
+    ];
     channel
-        .request_pty(
-            false,
-            "xterm-256color",
-            cols,
-            rows,
-            0,
-            0,
-            &[(russh::Pty::ECHO, 1)],
-        )
+        .request_pty(false, "xterm-256color", cols, rows, 0, 0, &modes)
         .await
         .map_err(|e| anyhow!("request pty: {e}"))?;
     channel
