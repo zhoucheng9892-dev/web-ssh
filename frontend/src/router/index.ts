@@ -1,9 +1,12 @@
-import { createRouter, createWebHistory } from 'vue-router'
+import { createRouter, createWebHashHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
-import { CONTEXT_PATH } from '@/context'
 
 const router = createRouter({
-  history: createWebHistory(CONTEXT_PATH || '/'),
+  // Hash mode: routes live behind '#' (e.g. /webssh/#/terminal), so the server
+  // only ever serves the document at /webssh/ — no SPA fallback needed for deep
+  // links. API/WS URLs are context-path-aware via appPath()/CONTEXT_PATH and are
+  // unaffected by the router mode.
+  history: createWebHashHistory(),
   routes: [
     {
       path: '/login',
