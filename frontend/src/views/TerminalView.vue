@@ -108,6 +108,11 @@ function reattachAll() {
 loadConnections()
 window.addEventListener('resize', onResize)
 
+// Listen for the sidebar pin toggle (not hover). AppLayout dispatches this
+// custom event only when `collapsed` actually changes via click — hover slide-out
+// doesn't fire it, so the terminal doesn't resize during hover.
+window.addEventListener('sidebar:toggle', onResize)
+
 // <KeepAlive> lifecycle: detach host divs when hidden, re-parent them back
 // when shown. paneRefs persist because KeepAlive keeps the DOM alive — the
 // mappings stay valid, only the host's parent changes.
@@ -124,6 +129,7 @@ onDeactivated(() => {
 // Hard unmount (e.g. logout): close everything.
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
+  window.removeEventListener('sidebar:toggle', onResize)
   for (const s of sessions.value) closeSession(s)
 })
 </script>
