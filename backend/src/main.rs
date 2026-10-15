@@ -5,7 +5,9 @@
 //! and served from `/`; in dev the frontend runs on Vite's own port and proxies
 //! `/api` here.
 
+mod audit;
 mod auth;
+mod cli;
 mod captcha;
 mod config;
 mod connections;
@@ -41,6 +43,22 @@ struct FrontendAsset;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Maintenance subcommands run against the DB and exit, before tracing is
+    // initialised so their output stays clean.
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(String::as_str) {
+        Some("reset-admin") => {
+            return cli::reset_admin(args.get(2).map(String::as_str), args.get(3).map(String::as_str))
+                .await;
+        }
+        Some("list-users") => return cli::list_users().await,
+        Some("help") | Some("--help") | Some("-h") => {
+            cli::print_help();
+            return Ok(());
+        }
+        _ => {}
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -105,6 +123,7 @@ fn build_router(state: AppState, context_path: &str) -> Router {
         .nest("/auth", auth::router())
         .nest("/connections", connections::router())
         .nest("/users", users::router())
+        .nest("/audit", audit::router())
         .route("/files/list", get(files::list))
         .route("/files/download", get(files::download))
         // Body limit is disabled app-wide below (after build_router) so large

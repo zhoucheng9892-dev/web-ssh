@@ -72,6 +72,15 @@ watch(collapsed, () => {
           <span class="icon">👥</span>
           <span v-if="expanded" class="label">用户管理</span>
         </RouterLink>
+        <RouterLink
+          v-if="auth.user?.is_admin"
+          to="/audit"
+          :class="{ active: active === 'audit' }"
+          :title="!expanded ? '审计日志' : undefined"
+        >
+          <span class="icon">📋</span>
+          <span v-if="expanded" class="label">审计日志</span>
+        </RouterLink>
       </nav>
       <div class="user" v-if="expanded">
         <div class="name">{{ auth.user?.username }}</div>

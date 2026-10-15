@@ -365,3 +365,122 @@ pub async fn get_connection_dial(pool: &Pool, user_id: i64, id: i64) -> Result<O
     })
     .await
 }
+
+// --- audit logs -------------------------------------------------------------
+
+/// A single recorded terminal command, for admin auditing.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditLog {
+    pub id: i64,
+    pub user_id: i64,
+    pub username: String,
+    pub connection_id: i64,
+    pub conn_name: Option<String>,
+    pub command: String,
+    pub created_at: String,
+}
+
+/// Filter for audit log queries. All fields optional.
+pub struct AuditFilter {
+    pub user_id: Option<i64>,
+    /// Inclusive start, e.g. "2024-01-01 00:00:00".
+    pub start: Option<String>,
+    /// Inclusive end.
+    pub end: Option<String>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+pub async fn insert_audit_log(
+    pool: &Pool,
+    user_id: i64,
+    username: &str,
+    connection_id: i64,
+    conn_name: Option<&str>,
+    command: &str,
+) -> Result<()> {
+    let username = username.to_string();
+    let conn_name = conn_name.map(|s| s.to_string());
+    let command = command.to_string();
+    with_conn(pool, move |c| {
+        c.execute(
+            "INSERT INTO audit_logs(user_id, username, connection_id, conn_name, command)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![user_id, username, connection_id, conn_name, command],
+        )?;
+        Ok(())
+    })
+    .await
+}
+
+pub async fn list_audit_logs(pool: &Pool, f: &AuditFilter) -> Result<Vec<AuditLog>> {
+    let user_id = f.user_id;
+    let start = f.start.clone();
+    let end = f.end.clone();
+    let limit = f.limit;
+    let offset = f.offset;
+    with_conn(pool, move |c| {
+        let mut sql = String::from(
+            "SELECT id, user_id, username, connection_id, conn_name, command, created_at
+             FROM audit_logs WHERE 1=1",
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if user_id.is_some() {
+            sql.push_str(" AND user_id = ?");
+            params.push(Box::new(user_id.unwrap()));
+        }
+        if start.is_some() {
+            sql.push_str(" AND created_at >= ?");
+            params.push(Box::new(start.clone().unwrap()));
+        }
+        if end.is_some() {
+            sql.push_str(" AND created_at <= ?");
+            params.push(Box::new(end.clone().unwrap()));
+        }
+        sql.push_str(" ORDER BY created_at DESC LIMIT ? OFFSET ?");
+        params.push(Box::new(limit));
+        params.push(Box::new(offset));
+        let mut stmt = c.prepare(&sql)?;
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let v = stmt
+            .query_map(params_refs.as_slice(), |r| {
+                Ok(AuditLog {
+                    id: r.get(0)?,
+                    user_id: r.get(1)?,
+                    username: r.get(2)?,
+                    connection_id: r.get(3)?,
+                    conn_name: r.get(4)?,
+                    command: r.get(5)?,
+                    created_at: r.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(v)
+    })
+    .await
+}
+
+pub async fn count_audit_logs(pool: &Pool, f: &AuditFilter) -> Result<i64> {
+    let user_id = f.user_id;
+    let start = f.start.clone();
+    let end = f.end.clone();
+    with_conn(pool, move |c| {
+        let mut sql = String::from("SELECT COUNT(*) FROM audit_logs WHERE 1=1");
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if user_id.is_some() {
+            sql.push_str(" AND user_id = ?");
+            params.push(Box::new(user_id.unwrap()));
+        }
+        if start.is_some() {
+            sql.push_str(" AND created_at >= ?");
+            params.push(Box::new(start.clone().unwrap()));
+        }
+        if end.is_some() {
+            sql.push_str(" AND created_at <= ?");
+            params.push(Box::new(end.clone().unwrap()));
+        }
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        c.query_row(&sql, params_refs.as_slice(), |r| r.get::<_, i64>(0))
+    })
+    .await
+}

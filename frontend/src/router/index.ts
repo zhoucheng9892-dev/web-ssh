@@ -50,6 +50,12 @@ const router = createRouter({
           component: () => import('@/views/UsersView.vue'),
           // Admin-only; AppLayout hides the nav entry for non-admins.
         },
+        {
+          path: 'audit',
+          name: 'audit',
+          component: () => import('@/views/AuditView.vue'),
+          // Admin-only; AppLayout hides the nav entry for non-admins.
+        },
       ],
     },
   ],
@@ -66,7 +72,7 @@ router.beforeEach(async (to) => {
     return { name: 'login' }
   }
   // Admin-only routes.
-  if (to.name === 'users' && !auth.user?.is_admin) {
+  if ((to.name === 'users' || to.name === 'audit') && !auth.user?.is_admin) {
     return { name: 'terminals' }
   }
   // Don't let logged-in users sit on login/setup pages.

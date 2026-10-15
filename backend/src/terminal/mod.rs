@@ -17,7 +17,7 @@ use tracing::Instrument;
 
 use crate::{
     auth::extractors::{AuthUser, resolve_secret},
-    db::models::{get_connection_dial, touch_last_used},
+    db::models::{get_connection_dial, get_user, insert_audit_log, touch_last_used},
     error::{AppError, AppResult},
     ssh,
     state::AppState,
@@ -63,6 +63,12 @@ pub async fn connect(
     let dial = get_connection_dial(&state.pool, user.0, q.connection_id)
         .await?
         .ok_or(AppError::NotFound)?;
+    // Snapshot the web-ssh username + connection name for audit logging.
+    let audit_username = get_user(&state.pool, user.0)
+        .await?
+        .map(|u| u.username)
+        .unwrap_or_else(|| user.0.to_string());
+    let conn_name = list_connections_name(&state.pool, user.0, q.connection_id).await;
 
     let handle = ssh::connect(&dial.host, dial.port as u16, &dial.username, &secret)
         .await
@@ -73,10 +79,21 @@ pub async fn connect(
     let _ = touch_last_used(&state.pool, q.connection_id).await;
 
     let idle_timeout = state.config.terminal_idle_timeout_secs;
+    let pool = state.pool.clone();
+    let uid = user.0;
+    let conn_id = q.connection_id;
     Ok(ws.on_upgrade(move |socket| {
-        run_bridge(socket, channel, idle_timeout)
+        run_bridge(socket, channel, idle_timeout, pool, uid, audit_username, conn_id, conn_name)
             .instrument(tracing::info_span!("terminal", conn = q.connection_id))
     }))
+}
+
+/// Look up a connection's name for the audit snapshot. Returns None if the
+/// connection was deleted between the HTTP handshake and here.
+async fn list_connections_name(pool: &deadpool_sqlite::Pool, user_id: i64, conn_id: i64) -> Option<String> {
+    use crate::db::models::list_connections;
+    let conns = list_connections(pool, user_id).await.ok()?;
+    conns.into_iter().find(|c| c.id == conn_id).map(|c| c.name)
 }
 
 /// `GET /api/terminal/probe?connection_id=` — pre-flight SSH connectivity check.
@@ -132,6 +149,11 @@ async fn run_bridge(
     socket: axum::extract::ws::WebSocket,
     mut channel: russh::Channel<client::Msg>,
     idle_timeout_secs: u64,
+    pool: deadpool_sqlite::Pool,
+    user_id: i64,
+    username: String,
+    connection_id: i64,
+    conn_name: Option<String>,
 ) {
     use axum::extract::ws::Message;
     use futures::{SinkExt, StreamExt};
@@ -139,6 +161,11 @@ async fn run_bridge(
 
     let (mut ws_sink, mut ws_stream) = socket.split();
     let (to_channel_tx, mut to_channel_rx) = mpsc::channel::<ToChannel>(64);
+
+    // Audit line buffer: accumulate visible characters until Enter (\r), then
+    // log the line. Handles backspace (\x7f / \x08); ignores other control
+    // chars and escape sequences so the stored command is human-readable.
+    let mut audit_buf = String::new();
 
     // Heartbeat: ping the client every HEARTBEAT_SECS to keep the connection
     // alive (defeats idle-killing NATs/proxies and remote sshd ClientAlive).
@@ -210,6 +237,20 @@ async fn run_bridge(
             cmd = to_channel_rx.recv() => match cmd {
                 Some(ToChannel::Data(bytes)) => {
                     last_activity = Instant::now();
+                    // Audit: feed bytes into the line buffer and log on Enter.
+                    let cmd_ready = process_audit_input(&mut audit_buf, &bytes);
+                    if let Some(cmd) = cmd_ready {
+                        if !cmd.trim().is_empty() {
+                            let p = pool.clone();
+                            let un = username.clone();
+                            let cn = conn_name.clone();
+                            tokio::spawn(async move {
+                                let _ = insert_audit_log(
+                                    &p, user_id, &un, connection_id, cn.as_deref(), &cmd,
+                                ).await;
+                            });
+                        }
+                    }
                     if channel.data(bytes.as_ref()).await.is_err() {
                         break;
                     }
@@ -255,6 +296,35 @@ struct ControlMsg {
     type_: String,
     cols: Option<u32>,
     rows: Option<u32>,
+}
+
+/// Feed raw PTY input bytes into the audit line buffer.
+///
+/// Returns `Some(command)` when a full line is ready (the user pressed Enter),
+/// or `None` while still accumulating. Backspace (`\x7f` / `\x08`) removes the
+/// last character; other control chars and ESC sequences (`\x1b...`) are
+/// skipped so the stored command is clean, human-readable text.
+fn process_audit_input(buf: &mut String, bytes: &[u8]) -> Option<String> {
+    let mut ready = None;
+    for &b in bytes {
+        match b {
+            b'\r' | b'\n' => {
+                // Enter — the current line is a complete command.
+                ready = Some(std::mem::take(buf));
+            }
+            0x7f | 0x08 => {
+                // Backspace / DEL — remove last char.
+                buf.pop();
+            }
+            0x00..=0x1f => {
+                // Other control chars (Ctrl-C, Tab, etc.) — ignore.
+            }
+            _ => {
+                buf.push(b as char);
+            }
+        }
+    }
+    ready
 }
 
 /// A future that completes at `last_activity + idle_secs`, or never if

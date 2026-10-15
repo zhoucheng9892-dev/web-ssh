@@ -46,6 +46,7 @@ fn run_migrations(pool: &Pool) -> Result<()> {
     let migrations: &[(&str, &str)] = &[
         ("0001_init", include_str!("../../migrations/0001_init.sql")),
         ("0002_users_disabled", include_str!("../../migrations/0002_users_disabled.sql")),
+        ("0003_audit_logs", include_str!("../../migrations/0003_audit_logs.sql")),
     ];
     let pool = pool.clone();
     tokio::task::block_in_place(|| {

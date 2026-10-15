@@ -70,6 +70,22 @@ npm run dev
 
 打开 http://127.0.0.1:5173 。首次访问会进入「初始化」页面创建管理员账号，之后即可添加 SSH 连接、打开终端、管理文件。
 
+## 重置管理员密码
+```aiignore
+# 忘了密码（最常用）—— 自动重置第一个管理员账号，生成随机密码并打印
+./web-ssh-backend reset-admin
+
+# 指定用户名重置
+./web-ssh-backend reset-admin testadmin
+
+# 指定新密码（不推荐：会留在 shell 历史里）
+./web-ssh-backend reset-admin testadmin NewPass123
+
+# 连用户名都忘了 —— 先列出所有账号
+./web-ssh-backend list-users
+
+```
+
 ## 生产构建（单二进制）
 
 ```bash
