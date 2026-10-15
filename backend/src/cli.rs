@@ -50,7 +50,13 @@ pub async fn reset_admin(username: Option<&str>, new_password: Option<&str>) -> 
         None => generate_password(16),
     };
 
-    let hash = crypto::hash_password(&password)?;
+    // The web login hashes the typed password client-side (SHA-256) before
+    // sending; the server then stores Argon2id of that. Mirror the exact same
+    // scheme here so a CLI-reset password is accepted by the login page —
+    // hashing the plaintext directly would store Argon2id(plaintext), which
+    // login (Argon2id(SHA-256)) can never match.
+    let wire = crypto::sha256_hex(&password);
+    let hash = crypto::hash_password(&wire)?;
     if !models::update_user_password(&pool, target.id, &hash).await? {
         bail!("user not found");
     }

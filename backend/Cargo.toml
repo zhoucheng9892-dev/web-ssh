@@ -37,6 +37,10 @@ russh-util = "0.48"
 aes-gcm = "0.10"
 rand = "0.8"
 base64 = "0.22"
+# SHA-256 for the password double-hash scheme: the client sends SHA-256 hex of
+# the password and we store Argon2id of that. Also used by the `reset-admin`
+# CLI so CLI-set passwords match what web login will send.
+sha2 = "0.10"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

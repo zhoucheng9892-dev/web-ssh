@@ -14,6 +14,23 @@ use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng as ArgonOsRng},
 };
+use sha2::{Digest, Sha256};
+
+/// SHA-256 of `input` as a lowercase hex string.
+///
+/// This mirrors what the web frontend sends: the browser hashes the typed
+/// password with SHA-256 before it ever hits the network, and the server then
+/// applies Argon2id on top (see `hash_password`). Server-side code that starts
+/// from a plaintext password (the `reset-admin` CLI) must call this first so
+/// the stored hash matches what login will verify against.
+pub fn sha256_hex(input: &str) -> String {
+    let digest = Sha256::digest(input.as_bytes());
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex
+}
 
 /// Encrypt a secret with AES-256-GCM. Returns (ciphertext, 12-byte nonce).
 pub fn encrypt_secret(master_key: &[u8], plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
